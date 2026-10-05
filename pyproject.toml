@@ -1,12 +1,18 @@
 [project]
 name = "talkmore"
 version = "0.1.0"
-description = "Small local microphone-to-text CLI for Apple Silicon"
+description = "Local voice input and menu bar dictation for Apple Silicon Macs"
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "mlx-qwen3-asr[mic]==0.4.4",
   "huggingface-hub>=0.20.0,<2",
+  "pyobjc-framework-Cocoa>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices>=11,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-AVFoundation>=11,<13; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

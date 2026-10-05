@@ -10,7 +10,7 @@ MODEL_ALIASES = {
     "8bit": "moona3k/mlx-qwen3-asr-0.6b-8bit",
 }
 DEFAULT_MODEL = MODEL_ALIASES["8bit"]
-DOWNLOAD_LIMIT = 1_000_000_000  # User's approval threshold: decimal 1 GB.
+DOWNLOAD_LIMIT = 1_000_000_000  # Automatic download limit: decimal 1 GB.
 PATTERNS = ("*.json", "*.safetensors", "*.txt", "*.model")
 
 
@@ -28,8 +28,8 @@ def checked_files(siblings):
     total = sum(f.size for f in files)
     if total > DOWNLOAD_LIMIT:
         raise RuntimeError(
-            f"模型文件共 {total / 1e9:.2f} GB，超过 1 GB 审批阈值，未下载。"
-            "请先向用户申请审批，再准备模型并通过 --model 指定本地目录。"
+            f"模型文件共 {total / 1e9:.2f} GB，超过 1 GB 自动下载上限，未下载。"
+            "请确认模型文件及大小，自行下载后通过 --model 指定本地目录。"
         )
     return files, total
 

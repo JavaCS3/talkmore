@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from talkmore.models import DEFAULT_MODEL, ensure_model, resolve_model
+from talkmore.recording import Recorder, SILENCE_RMS_THRESHOLD
 
-DEFAULT_MAX_DURATION = 120.0
-SILENCE_RMS_THRESHOLD = 1e-4
+DEFAULT_MAX_DURATION = 300.0
 
 
 def _positive_seconds(value: str) -> float:
@@ -73,57 +73,21 @@ def _record_audio(max_duration: float) -> tuple[Any, int]:
     if not sys.stdin.isatty():
         raise RuntimeError("record needs an interactive terminal so Enter can start and stop it")
 
-    try:
-        import numpy as np
-        import sounddevice as sd
-    except ImportError as exc:
-        raise RuntimeError(
-            "microphone recording needs sounddevice and numpy; install with `uv sync`"
-        ) from exc
-
-    try:
-        device_info = sd.query_devices(kind="input")
-    except Exception as exc:
-        raise RuntimeError(f"could not find a microphone input device: {exc}") from exc
-
-    if int(device_info.get("max_input_channels", 0)) < 1:
-        raise RuntimeError("the default audio device has no microphone input channel")
-
-    sample_rate = int(round(float(device_info["default_samplerate"])))
-    if sample_rate <= 0:
-        raise RuntimeError("the default microphone reported an invalid sample rate")
-
-    audio_blocks: list[Any] = []
-    callback_warnings: list[str] = []
-
-    def capture_callback(indata: Any, frame_count: int, time_info: Any, status: Any) -> None:
-        del frame_count, time_info
-        if status:
-            callback_warnings.append(str(status))
-        # The callback's buffer is reused by sounddevice, so retain a copy.
-        audio_blocks.append(indata[:, 0].copy())
-
-    print(f"Using the default microphone at {sample_rate} Hz.", file=sys.stderr)
     print("按 Enter 开始录音…", file=sys.stderr, flush=True)
     try:
         input()
     except EOFError as exc:
         raise RuntimeError("record needs an interactive terminal") from exc
 
-    try:
-        stream = sd.InputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=capture_callback,
-        )
-    except Exception as exc:
-        raise RuntimeError(f"could not open the microphone: {exc}") from exc
+    recorder = Recorder()
+    recorder.start()
+    sample_rate = recorder.sample_rate
+    print(f"Using the default microphone at {sample_rate} Hz.", file=sys.stderr)
+
     stop_requested = threading.Event()
 
     def wait_for_enter() -> None:
         try:
-            print("录音中，按 Enter 停止…", file=sys.stderr, flush=True)
             input()
         except EOFError:
             pass
@@ -133,10 +97,8 @@ def _record_audio(max_duration: float) -> tuple[Any, int]:
     reader = threading.Thread(target=wait_for_enter, name="talkmore-enter", daemon=True)
     started_at = time.monotonic()
     timed_out = False
-    stream_started = False
     try:
-        stream.start()
-        stream_started = True
+        print("录音中，按 Enter 停止…", file=sys.stderr, flush=True)
         reader.start()
         while not stop_requested.wait(timeout=0.1):
             if time.monotonic() - started_at >= max_duration:
@@ -144,32 +106,17 @@ def _record_audio(max_duration: float) -> tuple[Any, int]:
                 break
     except KeyboardInterrupt:
         print("\n录音已取消。", file=sys.stderr)
+        recorder.cancel()
         raise
     except Exception as exc:
+        recorder.cancel()
         raise RuntimeError(f"microphone recording failed: {exc}") from exc
-    finally:
-        # Stop and close the audio device even on Ctrl+C or an input error.
-        try:
-            if stream_started and stream.active:
-                stream.stop()
-        finally:
-            stream.close()
 
     if timed_out:
         print(f"已达到 {max_duration:g} 秒录音上限。", file=sys.stderr)
-    if callback_warnings:
-        print(f"Audio input warning: {callback_warnings[0]}", file=sys.stderr)
-
-    if not audio_blocks:
-        raise RuntimeError("没有录到音频，请检查麦克风后重试。")
-
-    audio = np.concatenate(audio_blocks).astype(np.float32, copy=False)
-    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
-    if not math.isfinite(rms) or rms < SILENCE_RMS_THRESHOLD:
-        raise RuntimeError(
-            "录音几乎没有声音，已跳过转写；请检查麦克风输入和系统权限。"
-        )
-    return audio, sample_rate
+    if recorder.warnings:
+        print(f"Audio input warning: {recorder.warnings[0]}", file=sys.stderr)
+    return recorder.stop()
 
 
 def _transcribe(session: Any, audio: Any, language: str | None) -> tuple[str, float]:
@@ -249,6 +196,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also save the recording as a mono 16-bit PCM WAV file",
     )
 
+    app_parser = commands.add_parser("app", help="run the global voice input menu bar app")
+    app_parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"4bit / 8bit, Hugging Face model ID, or local model directory (default: 8bit, {DEFAULT_MODEL})",
+    )
+    app_parser.add_argument(
+        "--language",
+        default="auto",
+        help="spoken language, or 'auto' for detection (default: auto)",
+    )
+    app_parser.add_argument(
+        "--max-duration",
+        type=_positive_seconds,
+        default=DEFAULT_MAX_DURATION,
+        metavar="SECONDS",
+        help=f"maximum recording duration (default: {DEFAULT_MAX_DURATION:g})",
+    )
+
     transcribe_parser = commands.add_parser(
         "transcribe", help="transcribe an existing audio file"
     )
@@ -262,6 +228,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "app":
+            # Keep AppKit and other macOS-only desktop dependencies out of CLI use.
+            from talkmore.app import run_app
+
+            result = run_app(
+                model=args.model,
+                language=args.language,
+                max_duration=args.max_duration,
+            )
+            return 0 if result is None else int(result)
         if args.command == "record":
             audio, sample_rate = _record_audio(args.max_duration)
             if args.save_audio is not None:
